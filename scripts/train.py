@@ -1,7 +1,3 @@
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -19,18 +15,36 @@ def create_sequences(data, seq_length):
         sequences.append((seq, label))
     return sequences
 
-def train_model(model, train_loader, criterion, optimizer, num_epochs):
+def train_model(model, train_loader, criterion, optimizer, num_epochs, patience=5):
     model.train()
+    best_loss = float('inf')
+    patience_counter = 0
+
     for epoch in range(num_epochs):
+        epoch_loss = 0
         for sequences, labels in train_loader:
             sequences = sequences.float().to(device)
-            labels = labels.float().to(device)
+            labels = labels.float().to(device).view(-1, 1)  # Reshape labels to match output shape
             outputs = model(sequences)
             loss = criterion(outputs, labels)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+            epoch_loss += loss.item()
+
+        epoch_loss /= len(train_loader)
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}')
+
+        # Early stopping
+        if epoch_loss < best_loss:
+            best_loss = epoch_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), 'models/bitcoin_price_predictor_gru.pth')
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered")
+                break
 
 if __name__ == "__main__":
     with open('scripts/config.json') as f:
@@ -55,4 +69,3 @@ if __name__ == "__main__":
     num_epochs = config['num_epochs']
 
     train_model(model, train_loader, criterion, optimizer, num_epochs)
-    torch.save(model.state_dict(), 'models/bitcoin_price_predictor_gru.pth')

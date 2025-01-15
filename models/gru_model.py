@@ -6,7 +6,7 @@ class BitcoinPricePredictorGRU(nn.Module):
         super(BitcoinPricePredictorGRU, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
+        self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)  # Added dropout
         self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
