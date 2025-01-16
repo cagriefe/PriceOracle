@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,7 +19,7 @@ def create_sequences(data, seq_length):
         sequences.append((seq, label))
     return sequences
 
-def train_model(model, train_loader, criterion, optimizer, num_epochs, patience=5):
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, patience=5):
     model.train()
     best_loss = float('inf')
     patience_counter = 0
@@ -35,9 +39,13 @@ def train_model(model, train_loader, criterion, optimizer, num_epochs, patience=
         epoch_loss /= len(train_loader)
         print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}')
 
+        # Validation loss
+        val_loss = evaluate_model(model, val_loader, criterion)
+        print(f'Epoch [{epoch+1}/{num_epochs}], Validation Loss: {val_loss:.4f}')
+
         # Early stopping
-        if epoch_loss < best_loss:
-            best_loss = epoch_loss
+        if val_loss < best_loss:
+            best_loss = val_loss
             patience_counter = 0
             torch.save(model.state_dict(), 'models/bitcoin_price_predictor_gru.pth')
         else:
@@ -45,6 +53,18 @@ def train_model(model, train_loader, criterion, optimizer, num_epochs, patience=
             if patience_counter >= patience:
                 print("Early stopping triggered")
                 break
+
+def evaluate_model(model, val_loader, criterion):
+    model.eval()
+    with torch.no_grad():
+        total_loss = 0
+        for sequences, labels in val_loader:
+            sequences = sequences.float().to(device)
+            labels = labels.float().to(device).view(-1, 1)  # Reshape labels to match output shape
+            outputs = model(sequences)
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
+    return total_loss / len(val_loader)
 
 if __name__ == "__main__":
     with open('scripts/config.json') as f:
@@ -58,14 +78,18 @@ if __name__ == "__main__":
     X, y = zip(*sequences)
     X, y = np.array(X), np.array(y)
     
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
+    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+    
     train_loader = torch.utils.data.DataLoader(list(zip(X_train, y_train)), batch_size=config['batch_size'], shuffle=True)
+    val_loader = torch.utils.data.DataLoader(list(zip(X_val, y_val)), batch_size=config['batch_size'], shuffle=False)
     test_loader = torch.utils.data.DataLoader(list(zip(X_test, y_test)), batch_size=config['batch_size'], shuffle=False)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = BitcoinPricePredictorGRU(input_size=config['input_size'], hidden_size=config['hidden_size'], num_layers=config['num_layers'], output_size=config['output_size']).to(device)
+    input_size = X_train.shape[2]  # Update input_size based on the number of features
+    model = BitcoinPricePredictorGRU(input_size=input_size, hidden_size=config['hidden_size'], num_layers=config['num_layers'], output_size=config['output_size']).to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
     num_epochs = config['num_epochs']
 
-    train_model(model, train_loader, criterion, optimizer, num_epochs)
+    train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs)

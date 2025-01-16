@@ -1,5 +1,5 @@
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 import ta
 
 def preprocess_data(file_path):
@@ -19,11 +19,20 @@ def preprocess_data(file_path):
     # Select relevant columns
     data = data[['close', 'SMA', 'EMA', 'RSI', 'MACD', 'Volume']]
     
-    scaler = MinMaxScaler(feature_range=(0, 1))
+    # Normalize the data using StandardScaler
+    scaler = StandardScaler()
     scaled_data = scaler.fit_transform(data)
-    return scaled_data, scaler
+    
+    # Create lagged features
+    df_scaled = pd.DataFrame(scaled_data, columns=['close', 'SMA', 'EMA', 'RSI', 'MACD', 'Volume'])
+    for lag in range(1, 6):
+        df_scaled[f'close_lag_{lag}'] = df_scaled['close'].shift(lag)
+    
+    df_scaled.dropna(inplace=True)
+    
+    return df_scaled.values, scaler
 
 if __name__ == "__main__":
     file_path = 'data/btc_usdt.csv'
     scaled_data, scaler = preprocess_data(file_path)
-    pd.DataFrame(scaled_data, columns=['close', 'SMA', 'EMA', 'RSI', 'MACD', 'Volume']).to_csv('data/scaled_btc_usdt.csv', index=False)
+    pd.DataFrame(scaled_data, columns=['close', 'SMA', 'EMA', 'RSI', 'MACD', 'Volume', 'close_lag_1', 'close_lag_2', 'close_lag_3', 'close_lag_4', 'close_lag_5']).to_csv('data/scaled_btc_usdt.csv', index=False)
