@@ -1,71 +1,147 @@
+"""Train the price model on a chronological train/validation split and save a self-contained checkpoint."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import argparse
+import copy
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-import pandas as pd
-import json
-from sklearn.model_selection import train_test_split
-from models.gru_model import BitcoinPricePredictorGRU
+from torch.utils.data import DataLoader
 
-def create_sequences(data, seq_length):
-    sequences = []
-    for i in range(len(data) - seq_length):
-        seq = data[i:i+seq_length]
-        label = data[i+seq_length, 0]  # Predicting the 'close' price
-        sequences.append((seq, label))
-    return sequences
+from data.dataset import prepare_training_data
+from data.preprocess import FEATURE_COLUMNS, prepare_frame
+from models import MODEL_TYPES, build_model
+from models.predictor import PricePredictor
+from utils.helpers import DEFAULT_CONFIG_PATH, cli_path, get_device, load_config, resolve_path, set_seed
+from utils.logger import get_logger
 
-def train_model(model, train_loader, criterion, optimizer, num_epochs, patience=5):
-    model.train()
-    best_loss = float('inf')
-    patience_counter = 0
+logger = get_logger(__name__)
 
-    for epoch in range(num_epochs):
-        epoch_loss = 0
-        for sequences, labels in train_loader:
-            sequences = sequences.float().to(device)
-            labels = labels.float().to(device).view(-1, 1)  # Reshape labels to match output shape
-            outputs = model(sequences)
-            loss = criterion(outputs, labels)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
 
-        epoch_loss /= len(train_loader)
-        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}')
+def run_epoch(model, loader, criterion, device, optimizer=None, max_grad_norm=1.0) -> float:
+    """One pass over ``loader``; trains when an optimizer is given, otherwise only evaluates."""
+    is_training = optimizer is not None
+    model.train(is_training)
+    total_loss, total_samples = 0.0, 0
+    with torch.set_grad_enabled(is_training):
+        for sequences, labels in loader:
+            sequences = sequences.to(device)
+            labels = labels.to(device).unsqueeze(-1)
+            loss = criterion(model(sequences), labels)
+            if is_training:
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.step()
+            total_loss += loss.item() * len(labels)
+            total_samples += len(labels)
+    return total_loss / total_samples
 
-        # Early stopping
-        if epoch_loss < best_loss:
-            best_loss = epoch_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), 'models/bitcoin_price_predictor_gru.pth')
+
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, patience=8, scheduler=None):
+    """Early-stop on validation loss (never on training loss) and restore the best weights."""
+    best_val_loss = float("inf")
+    best_state = copy.deepcopy(model.state_dict())
+    epochs_without_improvement = 0
+    history = []
+    for epoch in range(1, num_epochs + 1):
+        train_loss = run_epoch(model, train_loader, criterion, device, optimizer)
+        val_loss = run_epoch(model, val_loader, criterion, device)
+        if scheduler is not None:
+            scheduler.step(val_loss)
+        history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
+        logger.info("Epoch %3d/%d | train loss %.4f | val loss %.4f", epoch, num_epochs, train_loss, val_loss)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
+            epochs_without_improvement = 0
         else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print("Early stopping triggered")
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= patience:
+                logger.info("Early stopping: no validation improvement for %d epochs", patience)
                 break
 
+    model.load_state_dict(best_state)
+    return history
+
+
+def train(config: dict, device: str = "auto"):
+    set_seed(config["seed"])
+    device = get_device(device)
+
+    frame = prepare_frame(resolve_path(config["data_path"]), horizon=config["horizon"])
+    data = prepare_training_data(
+        frame, config["seq_length"], config["val_ratio"], config["test_ratio"], horizon=config["horizon"]
+    )
+    for split in ("train", "val", "test"):
+        indices = data.splits[split]
+        logger.info(
+            "%-5s %6d samples | %s -> %s", split, len(indices), frame.index[indices[0]], frame.index[indices[-1]]
+        )
+
+    train_loader = DataLoader(data.dataset("train"), batch_size=config["batch_size"], shuffle=True)
+    val_loader = DataLoader(data.dataset("val"), batch_size=config["batch_size"])
+
+    model = build_model(
+        config["model_type"],
+        input_size=len(FEATURE_COLUMNS),
+        hidden_size=config["hidden_size"],
+        num_layers=config["num_layers"],
+        dropout=config["dropout"],
+    ).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"])
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, factor=0.5, patience=max(1, config["patience"] // 3)
+    )
+    logger.info("Training %s on %s", config["model_type"].upper(), device)
+
+    # Huber loss keeps the rare crash candles (|z| > 20) in this fat-tailed data from dominating the gradients.
+    criterion = nn.HuberLoss()
+    history = train_model(
+        model,
+        train_loader,
+        val_loader,
+        criterion,
+        optimizer,
+        config["num_epochs"],
+        device,
+        config["patience"],
+        scheduler,
+    )
+
+    predictor = PricePredictor(model, config, FEATURE_COLUMNS, data.feature_scaler, data.target_scaler, data.boundaries)
+    predictor.save(resolve_path(config["model_path"]), history=history)
+    logger.info("Saved checkpoint to %s", config["model_path"])
+    return predictor, history
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="JSON config file")
+    parser.add_argument("--data-path", help="OHLCV CSV to train on (overrides the config)")
+    parser.add_argument("--model-path", help="Where to save the checkpoint (overrides the config)")
+    parser.add_argument("--model-type", choices=sorted(MODEL_TYPES), help="Network architecture")
+    parser.add_argument("--epochs", type=int, help="Maximum number of epochs")
+    parser.add_argument("--device", default="auto", help="auto, cpu, cuda or mps")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    config = load_config(
+        args.config,
+        data_path=cli_path(args.data_path),
+        model_path=cli_path(args.model_path),
+        model_type=args.model_type,
+        num_epochs=args.epochs,
+    )
+    train(config, device=args.device)
+
+
 if __name__ == "__main__":
-    with open('scripts/config.json') as f:
-        config = json.load(f)
-
-    data = pd.read_csv('data/scaled_btc_usdt.csv').values
-    seq_length = config['seq_length']
-    sequences = create_sequences(data, seq_length)
-    
-    # Separate sequences and labels
-    X, y = zip(*sequences)
-    X, y = np.array(X), np.array(y)
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    train_loader = torch.utils.data.DataLoader(list(zip(X_train, y_train)), batch_size=config['batch_size'], shuffle=True)
-    test_loader = torch.utils.data.DataLoader(list(zip(X_test, y_test)), batch_size=config['batch_size'], shuffle=False)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = BitcoinPricePredictorGRU(input_size=config['input_size'], hidden_size=config['hidden_size'], num_layers=config['num_layers'], output_size=config['output_size']).to(device)
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
-    num_epochs = config['num_epochs']
-
-    train_model(model, train_loader, criterion, optimizer, num_epochs)
+    main()
