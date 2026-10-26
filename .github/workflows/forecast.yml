@@ -1,23 +1,13 @@
 name: Live forecast
 
-# Refreshes the candles every hour, retrains the model once a week (or whenever the model code changes),
-# and publishes the dashboard to GitHub Pages. Enable Pages under
+# Once a month: refreshes the candles, retrains the model and publishes the dashboard to GitHub Pages.
+# Run it manually from the Actions tab for an update in between. Pages must be enabled under
 # Settings > Pages > Build and deployment > Source: GitHub Actions; until then, scheduled runs skip the build.
 
 on:
   schedule:
-    - cron: "7 * * * *"
+    - cron: "17 3 1 * *"
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/forecast.yml"
-      - "analysis/**"
-      - "data/*.py"
-      - "models/**"
-      - "scripts/**"
-      - "utils/**"
-      - "requirements.txt"
 
 permissions:
   contents: read
@@ -69,17 +59,17 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
 
-      - name: Compute the weekly model key
+      - name: Compute the monthly model key
         if: steps.gate.outputs.build == 'true'
-        id: week
-        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+        id: month
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
 
-      - name: Restore this week's model
+      - name: Restore this month's model
         if: steps.gate.outputs.build == 'true'
         uses: actions/cache@v6
         with:
           path: models/bitcoin_price_predictor.pt
-          key: model-${{ hashFiles('models/*.py', 'data/*.py', 'scripts/train.py', 'scripts/config.json') }}-${{ steps.week.outputs.week }}
+          key: model-${{ hashFiles('models/*.py', 'data/*.py', 'scripts/train.py', 'scripts/config.json') }}-${{ steps.month.outputs.month }}
 
       - name: Refresh candles, train if needed and build the dashboard
         if: steps.gate.outputs.build == 'true'

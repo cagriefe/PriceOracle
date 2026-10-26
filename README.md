@@ -15,7 +15,7 @@ Most price-prediction demos show a near-perfect fit that comes from data leakage
 - **Honest baselines.** Every number is reported next to a naive last-close forecast and the classic risk models used in practice: EWMA (RiskMetrics-style) volatility and historical simulation.
 - **Reality check with costs.** A backtester turns forecasts into trading rules and charges exchange fees and slippage on every trade.
 - **Leakage-free by construction.** Causal features, chronological splits, training-only scalers, and calibration that only uses outcomes already known at forecast time.
-- **Live.** A GitHub Actions workflow refreshes the data every hour, retrains weekly and republishes the dashboard.
+- **Live.** A GitHub Actions workflow refreshes the data, retrains the model and republishes the dashboard once a month.
 
 ## Results
 
@@ -92,7 +92,7 @@ The lowest pinball loss comes from the **GRU** (9.394 bps, 90.0% coverage of the
 - the backtest with equity and drawdown curves;
 - permutation feature importance.
 
-The **Live forecast** workflow (`.github/workflows/forecast.yml`) rebuilds the dashboard every hour and publishes it to GitHub Pages. To turn it on, open the repository's **Settings → Pages** and set **Source** to **GitHub Actions**. Until then, scheduled runs skip the build, and manual runs upload the dashboard as a downloadable artifact. The model is retrained once a week, or whenever the model code changes.
+The **Live forecast** workflow (`.github/workflows/forecast.yml`) runs on the first day of every month. It refreshes the data, retrains the model and republishes the dashboard on GitHub Pages, and you can also start it at any time from the **Actions** tab. To publish from your own copy, open **Settings → Pages** and set **Source** to **GitHub Actions**. Until then, scheduled runs skip the build, and manual runs upload the dashboard as a downloadable artifact.
 
 ## Quick start
 
