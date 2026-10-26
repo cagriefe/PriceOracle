@@ -75,6 +75,9 @@ def validate_quantiles(quantiles) -> list:
     quantiles = [float(q) for q in quantiles]
     if quantiles != sorted(set(quantiles)) or not all(0 < q < 1 for q in quantiles) or 0.5 not in quantiles:
         raise ValueError("quantiles must be strictly increasing values in (0, 1) that include 0.5")
+    rounded = [round(q, 6) for q in quantiles]
+    if not any(round(1 - q, 6) in rounded for q in rounded if q < 0.5):
+        raise ValueError("quantiles need at least one symmetric pair, such as 0.05 and 0.95, to form an interval")
     return quantiles
 
 

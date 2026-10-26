@@ -9,6 +9,7 @@ from models import MODEL_TYPES, MonotoneQuantiles, build_model
 from models.layers import PinballLoss
 from models.predictor import PricePredictor
 from models.tcn_model import CausalConvBlock
+from scripts.train import validate_quantiles
 from tests.synthetic import make_predictor
 
 
@@ -62,6 +63,16 @@ def test_pinball_loss_matches_the_definition():
     diff = 1.5 - np.array([0.0, 1.0, 2.0])
     expected = np.mean(np.maximum(np.array(quantiles) * diff, (np.array(quantiles) - 1) * diff))
     assert PinballLoss(quantiles)(predictions, target).item() == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("quantiles", [[0.25, 0.75], [0.5, 0.25, 0.75], [0.0, 0.5, 1.0], [0.1, 0.5, 0.8]])
+def test_invalid_quantile_sets_are_rejected(quantiles):
+    with pytest.raises(ValueError):
+        validate_quantiles(quantiles)
+
+
+def test_valid_quantile_sets_are_accepted():
+    assert validate_quantiles([0.1, 0.5, 0.9]) == [0.1, 0.5, 0.9]
 
 
 def test_checkpoint_round_trip_reproduces_predictions(tmp_path, ohlcv):
