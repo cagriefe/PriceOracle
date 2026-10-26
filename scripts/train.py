@@ -1,4 +1,4 @@
-"""Train the price model on a chronological train/validation split and save a self-contained checkpoint."""
+"""Train a quantile forecaster on a chronological train/validation split and save a self-contained checkpoint."""
 
 import sys
 from pathlib import Path
@@ -14,7 +14,8 @@ from torch.utils.data import DataLoader
 
 from data.dataset import prepare_training_data
 from data.preprocess import FEATURE_COLUMNS, prepare_frame
-from models import MODEL_TYPES, build_model
+from models import MODEL_TYPES, build_model, count_parameters
+from models.layers import PinballLoss
 from models.predictor import PricePredictor
 from utils.helpers import DEFAULT_CONFIG_PATH, cli_path, get_device, load_config, resolve_path, set_seed
 from utils.logger import get_logger
@@ -70,6 +71,13 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     return history
 
 
+def validate_quantiles(quantiles) -> list:
+    quantiles = [float(q) for q in quantiles]
+    if quantiles != sorted(set(quantiles)) or not all(0 < q < 1 for q in quantiles) or 0.5 not in quantiles:
+        raise ValueError("quantiles must be strictly increasing values in (0, 1) that include 0.5")
+    return quantiles
+
+
 def train(config: dict, device: str = "auto"):
     set_seed(config["seed"])
     device = get_device(device)
@@ -87,21 +95,25 @@ def train(config: dict, device: str = "auto"):
     train_loader = DataLoader(data.dataset("train"), batch_size=config["batch_size"], shuffle=True)
     val_loader = DataLoader(data.dataset("val"), batch_size=config["batch_size"])
 
+    quantiles = validate_quantiles(config["quantiles"])
     model = build_model(
         config["model_type"],
         input_size=len(FEATURE_COLUMNS),
         hidden_size=config["hidden_size"],
         num_layers=config["num_layers"],
         dropout=config["dropout"],
+        output_size=len(quantiles),
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, factor=0.5, patience=max(1, config["patience"] // 3)
     )
-    logger.info("Training %s on %s", config["model_type"].upper(), device)
+    logger.info(
+        "Training %s (%s parameters) on %s", config["model_type"].upper(), f"{count_parameters(model):,}", device
+    )
 
-    # Huber loss keeps the rare crash candles (|z| > 20) in this fat-tailed data from dominating the gradients.
-    criterion = nn.HuberLoss()
+    # The pinball loss is linear in the error, so the rare crash candles do not dominate the gradients.
+    criterion = PinballLoss(quantiles).to(device)
     history = train_model(
         model,
         train_loader,

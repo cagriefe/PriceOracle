@@ -62,3 +62,8 @@ def build_frame(data: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
 
 def prepare_frame(file_path, horizon: int = 1) -> pd.DataFrame:
     return build_frame(load_ohlcv(file_path), horizon=horizon)
+
+
+def candle_interval(index: pd.DatetimeIndex) -> pd.Timedelta:
+    """Most common spacing between candles (robust to occasional exchange-outage gaps)."""
+    return pd.Series(index).diff().mode().iloc[0]
