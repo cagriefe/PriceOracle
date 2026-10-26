@@ -1,4 +1,4 @@
-"""Evaluate a checkpoint on its held-out period and compare it with naive baselines."""
+"""Evaluate a checkpoint on its held-out period: point accuracy, direction and calibrated risk intervals."""
 
 import sys
 from pathlib import Path
@@ -10,64 +10,65 @@ import json
 
 import numpy as np
 
-from data.preprocess import prepare_frame
-from models.predictor import PricePredictor
-from utils.helpers import DEFAULT_CONFIG_PATH, cli_path, get_device, load_config, resolve_path
-from utils.metrics import price_metrics, up_move_ratio
+from analysis.evaluation import evaluate_forecasts
+from analysis.forecasts import interval_levels, level_name, load_forecasts, quantile_column
+from utils.helpers import DEFAULT_CONFIG_PATH, cli_path, load_config
+
+METHOD_LABELS = {
+    "raw": "Model, raw quantiles",
+    "static": "Model + static conformal",
+    "rolling": "Model + rolling conformal",
+    "hist": "Historical simulation",
+    "ewma": "EWMA volatility",
+}
 
 
 def evaluate(model_path, data_path=None, split="test", device="auto", plot_path=None) -> dict:
-    predictor = PricePredictor.load(resolve_path(model_path), get_device(device))
-    frame = prepare_frame(resolve_path(data_path or predictor.config["data_path"]), horizon=predictor.horizon)
-    end_indices = predictor.split_indices(frame)[split]
-    if len(end_indices) == 0:
-        raise ValueError(f"The {split!r} split is empty for this dataset.")
-
-    reference = frame["close"].to_numpy()[end_indices]
-    actual = reference * np.exp(frame["target"].to_numpy()[end_indices])
-    predicted = reference * np.exp(predictor.predict_log_returns(frame, end_indices))
-    # Timestamps of the forecasted candles, `horizon` rows after each window's last candle.
-    target_times = frame.index[end_indices + predictor.horizon]
-    naive = price_metrics(actual, reference, reference)
-    naive.pop("directional_accuracy")  # a flat forecast never predicts a direction
-
-    results = {
-        "split": split,
-        "model_type": predictor.config["model_type"],
-        "horizon": predictor.horizon,
-        "start": str(target_times[0]),
-        "end": str(target_times[-1]),
-        "samples": int(len(end_indices)),
-        "model": price_metrics(actual, predicted, reference),
-        "naive": naive,
-        "always_up_accuracy": up_move_ratio(actual, reference),
-    }
+    predictor, _, table = load_forecasts(model_path, data_path, device)
+    results = evaluate_forecasts(table, predictor.quantiles, split)
+    results["model_type"] = predictor.config["model_type"]
+    results["horizon"] = predictor.horizon
     if plot_path:
-        plot_predictions(target_times, actual, predicted, plot_path, predictor.horizon)
+        plot_forecasts(table[table["split"] == split], predictor.quantiles, plot_path, predictor.horizon)
     return results
 
 
 def format_report(results: dict) -> str:
-    model, naive = results["model"], results["naive"]
-    name = results["model_type"].upper()
+    model, naive = results["point"]["model"], results["point"]["naive"]
+    direction, pinball = results["direction"], results["pinball"]
     horizon = results["horizon"]
     lines = [
         f"{results['split'].capitalize()} period: {results['start']} -> {results['end']} "
         f"({results['samples']:,} forecasts, {horizon} candle{'s' if horizon > 1 else ''} ahead)",
         "",
-        f"{'':<20}{'MAE ($)':>12}{'RMSE ($)':>12}{'MAPE':>10}",
-        f"{name:<20}{model['mae']:>12,.2f}{model['rmse']:>12,.2f}{model['mape']:>9.3f}%",
-        f"{'Naive (last close)':<20}{naive['mae']:>12,.2f}{naive['rmse']:>12,.2f}{naive['mape']:>9.3f}%",
+        f"{'Point forecast (median)':<28}{'MAE ($)':>12}{'RMSE ($)':>12}{'MAPE':>10}",
+        f"{results['model_type'].upper():<28}{model['mae']:>12,.2f}{model['rmse']:>12,.2f}{model['mape']:>9.3f}%",
+        f"{'Naive (last close)':<28}{naive['mae']:>12,.2f}{naive['rmse']:>12,.2f}{naive['mape']:>9.3f}%",
         "",
-        f"RMSE vs naive: {(1 - model['rmse'] / naive['rmse']) * 100:+.2f}% (positive = better than naive)",
-        f"Directional accuracy: {model['directional_accuracy'] * 100:.2f}% "
-        f"(always-up baseline: {results['always_up_accuracy'] * 100:.2f}%)",
+        f"Directional accuracy: {direction['accuracy'] * 100:.2f}% (always-up baseline: "
+        f"{direction['always_up'] * 100:.2f}%)",
+        f"Brier score of P(up): {direction['brier']:.4f} (coin flip: {direction['brier_coin_flip']:.4f})",
+        "",
+        f"{'Risk intervals':<28}{'Coverage':>10}{'Width':>10}{'Score':>10}",
+    ]
+    for level, intervals in results["intervals"].items():
+        lines.append(f"{level}% interval")
+        for method, metrics in intervals.items():
+            if metrics:
+                lines.append(
+                    f"  {METHOD_LABELS[method]:<26}{metrics['coverage'] * 100:>9.2f}%"
+                    f"{metrics['width'] * 100:>9.3f}%{metrics['interval_score'] * 100:>10.3f}"
+                )
+    lines += [
+        "",
+        "Pinball loss (bps, lower is better): "
+        + " | ".join(f"{METHOD_LABELS.get(name, 'Model')} {value * 1e4:.3f}" for name, value in pinball.items()),
     ]
     return "\n".join(lines)
 
 
-def plot_predictions(timestamps, actual, predicted, path, horizon=1, zoom=168) -> None:
-    """Save actual vs predicted closes for the whole period plus a zoom on the last ``zoom`` forecasts."""
+def plot_forecasts(rows, quantiles, path, horizon=1, zoom=168) -> None:
+    """Save actual closes with the median forecast and calibrated bands: whole period plus a recent zoom."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -75,24 +76,41 @@ def plot_predictions(timestamps, actual, predicted, path, horizon=1, zoom=168) -
     import matplotlib.pyplot as plt
     from matplotlib.ticker import StrMethodFormatter
 
-    fig, (ax_full, ax_zoom) = plt.subplots(2, 1, figsize=(12, 8))
-    ax_full.plot(timestamps, actual, label="Actual close", linewidth=1)
-    ax_full.plot(timestamps, predicted, label="Predicted close", linewidth=1, alpha=0.8)
-    ax_full.set_title(f"Out-of-sample forecasts, {horizon} candle{'s' if horizon > 1 else ''} ahead")
+    times = rows["target_time"].to_numpy()
+    close = rows["close"].to_numpy()
+    actual = close * np.exp(rows["actual"].to_numpy())
+    median = close * np.exp(rows[quantile_column(0.5)].to_numpy())
+    bands = [
+        (level, close * np.exp(rows[f"lo{level_name(level)}"]), close * np.exp(rows[f"hi{level_name(level)}"]))
+        for level, _, _ in interval_levels(quantiles)
+    ]
 
-    recent = slice(-min(zoom, len(timestamps)), None)
-    ax_zoom.plot(timestamps[recent], actual[recent], label="Actual close", marker=".", linewidth=1)
-    ax_zoom.plot(timestamps[recent], predicted[recent], label="Predicted close", marker=".", linewidth=1, alpha=0.8)
-    ax_zoom.set_title(f"Last {len(timestamps[recent])} forecasts")
-
-    for ax in (ax_full, ax_zoom):
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+    recent = slice(-min(zoom, len(rows)), None)
+    for ax, part in zip(axes, (slice(None), recent), strict=True):
+        for i, (level, lower, upper) in enumerate(bands):
+            ax.fill_between(
+                times[part],
+                lower[part],
+                upper[part],
+                color="tab:orange",
+                alpha=0.18 + 0.17 * i,
+                linewidth=0,
+                label=f"{level:.0%} interval",
+            )
+        ax.plot(times[part], actual[part], color="tab:blue", linewidth=1, label="Actual close")
+        ax.plot(times[part], median[part], color="tab:red", linewidth=1, linestyle="--", label="Median forecast")
         locator = mdates.AutoDateLocator()
         ax.xaxis.set_major_locator(locator)
         ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
         ax.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
         ax.set_ylabel("Price (USDT)")
         ax.grid(alpha=0.3)
-        ax.legend()
+        ax.legend(loc="upper left")
+    axes[0].set_title(
+        f"Out-of-sample forecasts with conformal intervals, {horizon} candle{'s' if horizon > 1 else ''} ahead"
+    )
+    axes[1].set_title(f"Last {len(rows.iloc[recent])} forecasts")
     fig.tight_layout()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=120)
@@ -103,8 +121,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-path", help="Checkpoint to evaluate (defaults to model_path in the config)")
     parser.add_argument("--data-path", help="OHLCV CSV (defaults to the path stored in the checkpoint)")
-    parser.add_argument("--split", choices=["train", "val", "test"], default="test")
-    parser.add_argument("--plot", help="Save an actual-vs-predicted chart to this PNG")
+    parser.add_argument("--split", choices=["val", "test"], default="test")
+    parser.add_argument("--plot", help="Save a chart of the forecasts and intervals to this PNG")
     parser.add_argument("--metrics-out", help="Write the metrics to this JSON file")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda or mps")
     args = parser.parse_args(argv)
