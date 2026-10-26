@@ -18,6 +18,7 @@ from utils.helpers import DEFAULT_CONFIG_PATH, cli_path, load_config, resolve_pa
 from utils.logger import get_logger
 
 DEFAULT_MODELS = ["linear", "gru", "lstm", "tcn", "transformer"]
+DISPLAY_NAMES = {"linear": "Linear", "gru": "GRU", "lstm": "LSTM", "tcn": "TCN", "transformer": "Transformer"}
 # A 4-block TCN sees 61 candles, enough to cover the default 48-candle window.
 MODEL_OVERRIDES = {"tcn": {"num_layers": 4}}
 BASELINE_NAMES = {"hist": "Historical simulation", "ewma": "EWMA volatility"}
@@ -54,7 +55,7 @@ def run_benchmark(config: dict, model_types, device: str = "auto", output_dir=No
         point = evaluation["point"]
         rows.append(
             {
-                "name": model_type.upper() if model_type != "linear" else "Linear",
+                "name": DISPLAY_NAMES[model_type],
                 "parameters": count_parameters(predictor.model),
                 "epochs": len(history),
                 "train_seconds": round(seconds, 1),

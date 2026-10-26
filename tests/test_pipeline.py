@@ -74,7 +74,7 @@ def test_command_line_entry_points(tiny_config, tmp_path, capsys):
 
 def test_benchmark_ranks_models_and_baselines(tiny_config, tmp_path):
     rows = benchmark_script.run_benchmark({**tiny_config, "num_epochs": 1}, ["linear", "transformer"], "cpu", tmp_path)
-    assert [row["name"] for row in rows] == ["Linear", "TRANSFORMER", "Historical simulation", "EWMA volatility"]
+    assert [row["name"] for row in rows] == ["Linear", "Transformer", "Historical simulation", "EWMA volatility"]
     table = benchmark_script.format_leaderboard(rows, tiny_config["quantiles"])
     assert table.count("\n") == len(rows) + 1
     assert "EWMA volatility" in table
