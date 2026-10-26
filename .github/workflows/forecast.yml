@@ -1,0 +1,112 @@
+name: Live forecast
+
+# Refreshes the candles every hour, retrains the model once a week (or whenever the model code changes),
+# and publishes the dashboard to GitHub Pages. Enable Pages under
+# Settings > Pages > Build and deployment > Source: GitHub Actions; until then, scheduled runs skip the build.
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/forecast.yml"
+      - "analysis/**"
+      - "data/*.py"
+      - "models/**"
+      - "scripts/**"
+      - "utils/**"
+      - "requirements.txt"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: live-forecast
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      pages: ${{ steps.pages.outcome }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check whether GitHub Pages is enabled
+        id: pages
+        uses: actions/configure-pages@v6
+        continue-on-error: true
+
+      - name: Decide whether to build
+        id: gate
+        env:
+          PAGES: ${{ steps.pages.outcome }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$PAGES" = "success" ] || [ "$EVENT" != "schedule" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub Pages is not enabled, so the scheduled dashboard build is skipped. Enable it under Settings > Pages > Source: GitHub Actions."
+          fi
+
+      - uses: actions/setup-python@v7
+        if: steps.gate.outputs.build == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Compute the weekly model key
+        if: steps.gate.outputs.build == 'true'
+        id: week
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore this week's model
+        if: steps.gate.outputs.build == 'true'
+        uses: actions/cache@v6
+        with:
+          path: models/bitcoin_price_predictor.pt
+          key: model-${{ hashFiles('models/*.py', 'data/*.py', 'scripts/train.py', 'scripts/config.json') }}-${{ steps.week.outputs.week }}
+
+      - name: Refresh candles, train if needed and build the dashboard
+        if: steps.gate.outputs.build == 'true'
+        run: python scripts/pipeline.py --reuse-model --output-dir site
+
+      - name: Upload the dashboard as an artifact
+        if: steps.gate.outputs.build == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dashboard
+          path: site
+          retention-days: 7
+
+      - name: Upload the GitHub Pages artifact
+        if: steps.gate.outputs.build == 'true' && steps.pages.outcome == 'success'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.pages == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

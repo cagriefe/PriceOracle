@@ -179,5 +179,6 @@ models/*.pth
 data/predictions.csv
 data/scaled_btc_usdt.csv
 reports/
+site/
 
 todo.txt
