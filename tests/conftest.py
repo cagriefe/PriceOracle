@@ -5,6 +5,13 @@ from tests.synthetic import make_ohlcv, write_ohlcv_csv
 from utils.helpers import load_config
 
 
+@pytest.fixture(autouse=True)
+def outside_github_actions(monkeypatch):
+    """Keep tests from writing annotations or job summaries when the suite itself runs in CI."""
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+
 @pytest.fixture
 def ohlcv() -> pd.DataFrame:
     return make_ohlcv()
@@ -26,4 +33,5 @@ def tiny_config(tmp_path, ohlcv_csv) -> dict:
         batch_size=32,
         num_epochs=2,
         patience=2,
+        conformal_window=24,
     )

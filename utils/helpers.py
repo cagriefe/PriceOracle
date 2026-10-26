@@ -1,4 +1,5 @@
 import json
+import os
 import random
 from pathlib import Path
 
@@ -40,3 +41,17 @@ def get_device(preference: str = "auto") -> torch.device:
     if preference == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(preference)
+
+
+def github_annotation(level: str, message: str) -> None:
+    """Emit a GitHub Actions annotation (``notice``, ``warning`` or ``error``); a no-op outside Actions."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::{level}::{message}", flush=True)
+
+
+def github_step_summary(markdown: str) -> None:
+    """Append Markdown to the GitHub Actions job summary; a no-op outside Actions."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a", encoding="utf-8") as summary:
+            summary.write(markdown + "\n")
